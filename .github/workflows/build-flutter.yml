@@ -93,44 +93,98 @@ jobs:
 
       # ── FIX: Auto-fix font_awesome_flutter & compileSdk/AGP ──────────
       # font_awesome_flutter 10.9.x/10.12.x extend IconData (final class) → error Flutter 3.32+
-      # Solusi: force pin ke ^10.8.0 jika ditemukan di pubspec
+      # Solusi: force pin ke 10.8.0 EXACT (bukan ^) supaya pub upgrade tidak naik lagi
       # + upgrade compileSdk & AGP supaya androidx deps bisa resolve
+      # Support both Groovy DSL (.gradle) dan Kotlin DSL (.gradle.kts)
       - name: Fix incompatible packages (font_awesome_flutter etc)
         continue-on-error: true
         run: |
           echo "🔧 Checking for incompatible packages..."
 
           # ── Fix font_awesome_flutter ─────────────────────────────────
+          # Pin ke EXACT 10.8.0 (tanpa ^) supaya pub upgrade tidak naik ke 10.12.x
           if grep -q "font_awesome_flutter" pubspec.yaml; then
-            echo "📦 font_awesome_flutter ditemukan, force pin ke ^10.8.0 (kompatibel Flutter 3.32+)..."
-            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+            echo "📦 font_awesome_flutter ditemukan, pin exact ke 10.8.0..."
+            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: 10.8.0/' pubspec.yaml
             echo "✅ pubspec.yaml setelah patch:"
             grep "font_awesome_flutter" pubspec.yaml
           fi
 
-          # ── Fix compileSdk & AGP di android/app/build.gradle ────────
+          # ── Fix compileSdk di app/build.gradle (Groovy DSL) ──────────
           # androidx 1.17.0 butuh compileSdk 36 dan AGP 8.9.1+
-          if [ -f android/app/build.gradle ]; then
-            echo "🔧 Patching android/app/build.gradle (compileSdk → 36, targetSdk → 36)..."
-            sed -i 's/compileSdk[[:space:]]*[0-9]*/compileSdk 36/' android/app/build.gradle
-            sed -i 's/compileSdkVersion[[:space:]]*[0-9]*/compileSdkVersion 36/' android/app/build.gradle
-            sed -i 's/targetSdk[[:space:]]*[0-9]*/targetSdk 36/' android/app/build.gradle
-            sed -i 's/targetSdkVersion[[:space:]]*[0-9]*/targetSdkVersion 36/' android/app/build.gradle
-            echo "✅ android/app/build.gradle setelah patch:"
-            grep -E "compileSdk|targetSdk" android/app/build.gradle || true
+          for BFILE in android/app/build.gradle; do
+            if [ -f "$BFILE" ]; then
+              echo "🔧 Patching $BFILE (Groovy DSL)..."
+              # Groovy: compileSdk 35  /  compileSdkVersion 35
+              sed -i 's/compileSdk[[:space:]]+[0-9]+/compileSdk 36/g' "$BFILE"
+              sed -i 's/compileSdkVersion[[:space:]]+[0-9]+/compileSdkVersion 36/g' "$BFILE"
+              sed -i 's/targetSdk[[:space:]]+[0-9]+/targetSdk 36/g' "$BFILE"
+              sed -i 's/targetSdkVersion[[:space:]]+[0-9]+/targetSdkVersion 36/g' "$BFILE"
+              echo "✅ Result:" && grep -E "compileSdk|targetSdk" "$BFILE" || true
+            fi
+          done
+
+          # ── Fix compileSdk di app/build.gradle.kts (Kotlin DSL) ──────
+          for BFILE in android/app/build.gradle.kts; do
+            if [ -f "$BFILE" ]; then
+              echo "🔧 Patching $BFILE (Kotlin DSL)..."
+              # Kotlin: compileSdk = 35  /  compileSdk(35)
+              sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]+/compileSdk = 36/g' "$BFILE"
+              sed -i 's/compileSdk([0-9]+)/compileSdk(36)/g' "$BFILE"
+              sed -i 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]+/targetSdk = 36/g' "$BFILE"
+              sed -i 's/targetSdk([0-9]+)/targetSdk(36)/g' "$BFILE"
+              echo "✅ Result:" && grep -E "compileSdk|targetSdk" "$BFILE" || true
+            fi
+          done
+
+          # ── Fix AGP di android/build.gradle (Groovy, classpath style) ─
+          if [ -f android/build.gradle ]; then
+            echo "🔧 Patching android/build.gradle (AGP classpath → 8.9.1)..."
+            sed -i "s/com.android.tools.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:8.9.1/g" android/build.gradle
+            echo "✅ Result:" && grep "com.android.tools.build" android/build.gradle || true
           fi
 
-          # ── Fix AGP version di android/build.gradle ──────────────────
-          if [ -f android/build.gradle ]; then
-            echo "🔧 Patching android/build.gradle (AGP → 8.9.1)..."
-            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.9.1/" android/build.gradle
-            echo "✅ android/build.gradle setelah patch:"
-            grep "com.android.tools.build" android/build.gradle || true
+          # ── Fix AGP di android/build.gradle.kts (Kotlin, classpath style) ─
+          if [ -f android/build.gradle.kts ]; then
+            echo "🔧 Patching android/build.gradle.kts (AGP classpath → 8.9.1)..."
+            sed -i 's/com.android.tools.build:gradle:[0-9][0-9.]*/com.android.tools.build:gradle:8.9.1/g' android/build.gradle.kts
+            echo "✅ Result:" && grep "com.android.tools.build" android/build.gradle.kts || true
           fi
-          # Juga cek di settings.gradle (project-level plugin)
+
+          # ── Fix AGP di android/settings.gradle (new plugin DSL, Groovy) ─
           if [ -f android/settings.gradle ]; then
-            sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "8.9.1"/' android/settings.gradle || true
-            sed -i "s/id 'com.android.application' version '[^']*'/id 'com.android.application' version '8.9.1'/" android/settings.gradle || true
+            echo "🔧 Patching android/settings.gradle (plugin DSL AGP → 8.9.1)..."
+            # Format: id "com.android.application" version "8.7.3"
+            sed -i 's/id[[:space:]]*"com.android.application"[[:space:]]*version[[:space:]]*"[^"]*"/id "com.android.application" version "8.9.1"/g' android/settings.gradle
+            sed -i "s/id[[:space:]]*'com.android.application'[[:space:]]*version[[:space:]]*'[^']*'/id 'com.android.application' version '8.9.1'/g" android/settings.gradle
+            # Format: id("com.android.application") version "8.7.3"
+            sed -i 's/id("com.android.application")[[:space:]]*version[[:space:]]*"[^"]*"/id("com.android.application") version "8.9.1"/g' android/settings.gradle
+            echo "✅ Result:" && grep -E "com.android.application" android/settings.gradle || true
+          fi
+
+          # ── Fix AGP di android/settings.gradle.kts (Kotlin DSL) ──────
+          # Format asli: id("com.android.application") version "8.7.3" apply false
+          # Pattern harus preserve "apply false" di belakang version
+          if [ -f android/settings.gradle.kts ]; then
+            echo "🔧 Patching android/settings.gradle.kts (plugin DSL AGP → 8.9.1)..."
+            # Dengan apply false — pakai python supaya backreference aman
+            python3 -c "
+import re, sys
+content = open('android/settings.gradle.kts').read()
+content = re.sub(
+  r'id\("com\.android\.application"\)\s+version\s+"[^"]+"(\s+apply\s+false)?',
+  lambda m: 'id("com.android.application") version "8.9.1"' + (m.group(1) or ''),
+  content
+)
+content = re.sub(
+  r'id\("org\.jetbrains\.kotlin\.android"\)\s+version\s+"[^"]+"(\s+apply\s+false)?',
+  lambda m: 'id("org.jetbrains.kotlin.android") version "2.1.20"' + (m.group(1) or ''),
+  content
+)
+open('android/settings.gradle.kts', 'w').write(content)
+print('Done')
+" || true
+            echo "✅ Result:" && grep -E "com.android|kotlin.android" android/settings.gradle.kts || true
           fi
 
           # ── Fix Gradle wrapper ────────────────────────────────────────
@@ -138,18 +192,14 @@ jobs:
           WRAPPER=android/gradle/wrapper/gradle-wrapper.properties
           if [ -f "$WRAPPER" ]; then
             echo "🔧 Patching gradle-wrapper.properties (Gradle → 8.14.1)..."
-            sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.14.1-bin.zip|' "$WRAPPER"
-            sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.14.1-all.zip|' "$WRAPPER"
-            echo "✅ Gradle wrapper:"
-            cat "$WRAPPER"
+            sed -i 's|gradle-[0-9][0-9.]*-bin.zip|gradle-8.14.1-bin.zip|g' "$WRAPPER"
+            sed -i 's|gradle-[0-9][0-9.]*-all.zip|gradle-8.14.1-all.zip|g' "$WRAPPER"
+            echo "✅ Gradle wrapper:" && cat "$WRAPPER"
           fi
 
           # ── Pub get setelah semua patch ───────────────────────────────
+          # JANGAN pub upgrade setelah pin font_awesome, nanti naik lagi ke 10.12.x
           flutter pub get 2>&1 | tee /tmp/pub_get2_log.txt
-
-          # Upgrade semua package yang bisa (minor/patch safe)
-          flutter pub upgrade 2>&1 || true
-          flutter pub get
 
       # Jika pub get gagal karena Dart SDK kurang → auto upgrade ke versi saran
       - name: Auto-fix Dart SDK version (if needed)
@@ -181,10 +231,10 @@ jobs:
           flutter build apk --release --no-tree-shake-icons 2>&1 | tee /tmp/build_log.txt
           BUILD_EXIT=${PIPESTATUS[0]}
 
-          # Kalau masih ada error final class setelah semua fix → force downgrade font_awesome
+          # Kalau masih ada error final class setelah semua fix → force pin exact
           if [ $BUILD_EXIT -ne 0 ] && grep -q "can't be extended outside of its library" /tmp/build_log.txt; then
-            echo "🔄 Build gagal karena font_awesome_flutter final class, force downgrade..."
-            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+            echo "🔄 Build gagal karena font_awesome_flutter final class, force pin exact 10.8.0..."
+            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: 10.8.0/' pubspec.yaml
             flutter pub get
             flutter build apk --release --no-tree-shake-icons
           elif [ $BUILD_EXIT -ne 0 ]; then
