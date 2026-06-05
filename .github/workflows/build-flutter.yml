@@ -1,0 +1,81 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_id:
+        description: 'Reference ID for this build'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Detect required Flutter version from pubspec.yaml
+        id: detect_flutter
+        run: |
+          SDK_CONSTRAINT=$(grep -E "^\s+sdk\s*:" pubspec.yaml | head -1 | sed "s/.*sdk\s*:\s*[\x27\x22]//;s/[\x27\x22].*//;s/\s//g")
+          echo "SDK constraint: $SDK_CONSTRAINT"
+          MIN_DART=$(echo "$SDK_CONSTRAINT" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+          echo "Min Dart SDK: $MIN_DART"
+          FLUTTER_VERSION="3.29.3"
+          if [ -n "$MIN_DART" ]; then
+            DART_MAJOR=$(echo $MIN_DART | cut -d. -f1)
+            DART_MINOR=$(echo $MIN_DART | cut -d. -f2)
+            if [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 8 ]; then
+              FLUTTER_VERSION="3.29.3"
+            elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 7 ]; then
+              FLUTTER_VERSION="3.27.4"
+            elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 4 ]; then
+              FLUTTER_VERSION="3.24.5"
+            elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 3 ]; then
+              FLUTTER_VERSION="3.19.6"
+            elif [ "$DART_MAJOR" -ge 3 ] && [ "$DART_MINOR" -ge 2 ]; then
+              FLUTTER_VERSION="3.16.9"
+            elif [ "$DART_MAJOR" -ge 3 ]; then
+              FLUTTER_VERSION="3.10.6"
+            else
+              FLUTTER_VERSION="3.0.5"
+            fi
+          fi
+          echo "Selected Flutter version: $FLUTTER_VERSION"
+          echo "flutter_version=$FLUTTER_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ steps.detect_flutter.outputs.flutter_version }}
+          channel: 'stable'
+          cache: true
+
+      - name: Fix font_awesome_flutter compatibility
+        run: |
+          if grep -q "font_awesome_flutter" pubspec.yaml; then
+            echo "Detected font_awesome_flutter - attempting upgrade to 10.8.0"
+            flutter pub add font_awesome_flutter:^10.8.0 || true
+          fi
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release --no-tree-shake-icons
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 1
