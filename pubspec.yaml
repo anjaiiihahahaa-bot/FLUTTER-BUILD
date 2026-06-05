@@ -53,7 +53,6 @@ flutter:
     - assets/videos/splash.mp4
     - assets/videos/load.mp4
     - assets/videos/login.mp4
-    - assets/videos/banner.mp4
     - assets/videos/bnb.mp4
 
   fonts:
