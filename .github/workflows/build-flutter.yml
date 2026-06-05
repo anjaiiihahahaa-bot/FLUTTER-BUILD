@@ -1,0 +1,178 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_id:
+        description: 'Ref ID dari bot'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Flutter (try 3.44.1)
+        id: flutter_3441
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.1'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.32.2)
+        id: flutter_3322
+        if: steps.flutter_3441.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.2'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.24.5)
+        id: flutter_3245
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.22.3)
+        id: flutter_3223
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.19.6)
+        id: flutter_3196
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.6'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (fallback latest stable)
+        id: flutter_latest
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure' && steps.flutter_3196.outcome == 'failure'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Print Flutter version
+        run: flutter --version
+
+      - name: Get dependencies
+        id: pub_get
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          flutter pub get 2>&1 | tee /tmp/pub_get_log.txt
+
+      # ── FIX: Auto-upgrade packages incompatible dengan Flutter terbaru ──
+      # font_awesome_flutter 10.9.x extend IconData (final class) → error di Flutter 3.32+
+      # Step ini upgrade dulu, kalau masih gagal fallback ke versi 10.8.0
+      - name: Fix incompatible packages (font_awesome_flutter etc)
+        continue-on-error: true
+        run: |
+          echo "🔧 Checking for incompatible packages..."
+
+          # Cek apakah pubspec pakai font_awesome_flutter
+          if grep -q "font_awesome_flutter" pubspec.yaml; then
+            echo "📦 font_awesome_flutter ditemukan, upgrade ke versi terbaru..."
+            flutter pub upgrade font_awesome_flutter 2>&1 || true
+
+            # Coba pub get ulang
+            flutter pub get 2>&1 | tee /tmp/pub_get2_log.txt
+
+            # Kalau masih ada error final class → downgrade ke 10.8.0
+            if grep -q "can't be extended outside of its library" /tmp/pub_get2_log.txt 2>/dev/null ||                flutter build apk --dry-run 2>&1 | grep -q "can't be extended outside"; then
+              echo "⚠️ Upgrade tidak cukup, downgrade font_awesome_flutter ke ^10.8.0..."
+              sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+              flutter pub get
+            fi
+          fi
+
+          # Upgrade semua package yang bisa (minor/patch safe)
+          flutter pub upgrade 2>&1 || true
+          flutter pub get
+
+      # Jika pub get gagal karena Dart SDK kurang → auto upgrade ke versi saran
+      - name: Auto-fix Dart SDK version (if needed)
+        if: steps.pub_get.outcome == 'failure'
+        run: |
+          SUGGESTED=$(grep -oP 'Flutter SDK version: K[0-9]+.[0-9]+.[0-9]+' /tmp/pub_get_log.txt | head -1)
+          if [ -z "$SUGGESTED" ]; then
+            echo "❌ Tidak ada saran versi dari pub get, lihat log:"
+            cat /tmp/pub_get_log.txt
+            exit 1
+          fi
+          echo "💡 Saran versi dari pub get: $SUGGESTED"
+          echo "FLUTTER_SUGGESTED=$SUGGESTED" >> $GITHUB_ENV
+
+      - name: Setup Flutter (suggested version from pub get)
+        if: steps.pub_get.outcome == 'failure' && env.FLUTTER_SUGGESTED != ''
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_SUGGESTED }}
+          channel: 'stable'
+          cache: true
+
+      - name: Get dependencies (retry with suggested version)
+        if: steps.pub_get.outcome == 'failure'
+        run: flutter pub get
+
+      - name: Build APK
+        run: |
+          flutter build apk --release --no-tree-shake-icons 2>&1 | tee /tmp/build_log.txt
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          # Kalau masih ada error final class setelah semua fix → force downgrade font_awesome
+          if [ $BUILD_EXIT -ne 0 ] && grep -q "can't be extended outside of its library" /tmp/build_log.txt; then
+            echo "🔄 Build gagal karena font_awesome_flutter final class, force downgrade..."
+            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+            flutter pub get
+            flutter build apk --release --no-tree-shake-icons
+          elif [ $BUILD_EXIT -ne 0 ]; then
+            echo "❌ Build gagal dengan alasan lain:"
+            cat /tmp/build_log.txt
+            exit 1
+          fi
+
+      - name: Rename APK
+        run: |
+          APK=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+          APP_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: //' | tr -d ' ')
+          cp "$APK" "${APP_NAME}.apk"
+          echo "APK_FILE=${APP_NAME}.apk" >> $GITHUB_ENV
+          echo "APK_NAME=${APP_NAME}"     >> $GITHUB_ENV
+          echo "✅ APK: ${APP_NAME}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}-apk
+          path: ${{ env.APK_FILE }}
+          retention-days: 3
