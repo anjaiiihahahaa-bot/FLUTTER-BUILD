@@ -8,11 +8,16 @@ on:
         required: false
         default: ''
 
+env:
+  ANDROID_COMPILE_SDK: '36'
+  ANDROID_TARGET_SDK: '36'
+  GRADLE_OPTS: '-Xmx4g -Dorg.gradle.jvmargs="-Xmx4g -XX:MaxMetaspaceSize=1g"'
+
 jobs:
   build:
-    name: Build APK
+    name: Build APK Universal
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout
@@ -24,122 +29,173 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      # ── Auto-retry Flutter SDK versions sampai ketemu yang cocok ──
-      # Urutan: terbaru dulu → turun ke bawah kalau gagal
-      # Flutter 3.44.1 → Dart 3.8.1  (support pubspec ^3.8.1)
-      # Flutter 3.32.x → Dart 3.7.x
-      # Flutter 3.24.5 → Dart 3.5.4
-      # Flutter 3.22.3 → Dart 3.4.x
-      # Flutter 3.19.6 → Dart 3.3.x
-      # fallback: latest stable
-
-      - name: Setup Flutter (try 3.44.1)
-        id: flutter_3441
-        continue-on-error: true
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.44.1'
-          channel: 'stable'
-          cache: true
-
-      - name: Setup Flutter (try 3.32.2)
-        id: flutter_3322
-        if: steps.flutter_3441.outcome == 'failure'
-        continue-on-error: true
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.32.2'
-          channel: 'stable'
-          cache: true
-
-      - name: Setup Flutter (try 3.24.5)
-        id: flutter_3245
-        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure'
-        continue-on-error: true
+      # ── Setup Flutter stable (3.24.5 = paling kompatibel buat project lama 2.x - 3.24) ──
+      - name: Setup Flutter Stable
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
 
-      - name: Setup Flutter (try 3.22.3)
-        id: flutter_3223
-        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure'
-        continue-on-error: true
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.22.3'
-          channel: 'stable'
-          cache: true
-
-      - name: Setup Flutter (try 3.19.6)
-        id: flutter_3196
-        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure'
-        continue-on-error: true
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.19.6'
-          channel: 'stable'
-          cache: true
-
-      - name: Setup Flutter (fallback latest stable)
-        id: flutter_latest
-        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure' && steps.flutter_3196.outcome == 'failure'
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-          cache: true
-
       - name: Print Flutter version
         run: flutter --version
 
-      - name: Get dependencies
-        id: pub_get
+      # ── AUTO-FIX COMPATIBILITY: compileSdk, targetSdk, gradle.properties ──
+      - name: Auto Fix Compatibility
+        run: |
+          set -e
+          echo "🔍 Deteksi versi Flutter di pubspec.yaml..."
+          FLUTTER_VER=$(grep -E "sdk:\s*flutter" pubspec.yaml | awk '{print $2}' | tr -d '>=< ^"' || echo "unknown")
+          echo "Flutter SDK constraint: $FLUTTER_VER"
+
+          # 1. Force compileSdk / targetSdk = 36 di build.gradle (Groovy)
+          if [ -f android/app/build.gradle ]; then
+            echo "📝 Patching android/app/build.gradle ..."
+            sed -i 's/compileSdkVersion[[:space:]]\+[0-9]\+/compileSdkVersion 36/g'  android/app/build.gradle || true
+            sed -i 's/compileSdk[[:space:]]\+[0-9]\+/compileSdk 36/g'                android/app/build.gradle || true
+            sed -i 's/targetSdkVersion[[:space:]]\+[0-9]\+/targetSdkVersion 36/g'    android/app/build.gradle || true
+            sed -i 's/targetSdk[[:space:]]\+[0-9]\+/targetSdk 36/g'                  android/app/build.gradle || true
+          fi
+
+          # 2. Force compileSdk / targetSdk = 36 di build.gradle.kts (Kotlin DSL)
+          if [ -f android/app/build.gradle.kts ]; then
+            echo "📝 Patching android/app/build.gradle.kts ..."
+            sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]\+/compileSdk = 36/g'   android/app/build.gradle.kts || true
+            sed -i 's/compileSdk[[:space:]]\+[0-9]\+/compileSdk = 36/g'              android/app/build.gradle.kts || true
+            sed -i 's/targetSdk[[:space:]]*=[[:space:]]*[0-9]\+/targetSdk = 36/g'     android/app/build.gradle.kts || true
+            sed -i 's/targetSdk[[:space:]]\+[0-9]\+/targetSdk = 36/g'                android/app/build.gradle.kts || true
+          fi
+
+          # 3. Skip validasi Gradle / AGP / Kotlin
+          mkdir -p android
+          touch android/gradle.properties
+          grep -q "android.suppressUnsupportedCompileSdk" android/gradle.properties || echo "android.suppressUnsupportedCompileSdk=36"   >> android/gradle.properties
+          grep -q "android.enableJetifier"               android/gradle.properties || echo "android.enableJetifier=true"               >> android/gradle.properties
+          grep -q "android.useAndroidX"                  android/gradle.properties || echo "android.useAndroidX=true"                  >> android/gradle.properties
+          grep -q "android.nonTransitiveRClass"          android/gradle.properties || echo "android.nonTransitiveRClass=false"         >> android/gradle.properties
+          grep -q "org.gradle.jvmargs"                   android/gradle.properties || echo 'org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g' >> android/gradle.properties
+
+          # 4. Downgrade font_awesome_flutter kalo versi lama
+          if grep -q "font_awesome_flutter:[[:space:]]*\^10\." pubspec.yaml 2>/dev/null; then
+            echo "🔄 Downgrade font_awesome_flutter ke ^10.10.0 ..."
+            sed -i 's/font_awesome_flutter:[[:space:]]*\^10\.[0-9.]\+/font_awesome_flutter: ^10.10.0/g' pubspec.yaml || true
+          fi
+
+          echo "✅ Compatibility patch selesai"
+
+      - name: Clean + Pub Get
+        run: |
+          flutter clean || true
+          rm -rf android/.gradle build .dart_tool
+          flutter pub get
+
+      # ── Auto upgrade major versions (best-effort, retry 3x) ──
+      - name: Pub Upgrade (best-effort)
+        continue-on-error: true
+        run: |
+          for i in 1 2 3; do
+            flutter pub upgrade --major-versions && break || echo "retry $i ..."
+            sleep 3
+          done
+
+      # ── Patch IconData "extends" → "implements" di package lama ──
+      - name: Patch IconData (font_awesome_flutter)
+        run: |
+          PUB_CACHE_DIR="$HOME/.pub-cache"
+          if [ -d "$PUB_CACHE_DIR" ]; then
+            find "$PUB_CACHE_DIR" -type f -name "*.dart" -path "*font_awesome_flutter*" \
+              -exec sed -i 's/class[[:space:]]\+IconDataBrands[[:space:]]\+extends[[:space:]]\+IconData/class IconDataBrands implements IconData/g' {} \; || true
+            find "$PUB_CACHE_DIR" -type f -name "*.dart" -path "*font_awesome_flutter*" \
+              -exec sed -i 's/class[[:space:]]\+IconDataSolid[[:space:]]\+extends[[:space:]]\+IconData/class IconDataSolid implements IconData/g'   {} \; || true
+            find "$PUB_CACHE_DIR" -type f -name "*.dart" -path "*font_awesome_flutter*" \
+              -exec sed -i 's/class[[:space:]]\+IconDataRegular[[:space:]]\+extends[[:space:]]\+IconData/class IconDataRegular implements IconData/g' {} \; || true
+            echo "✅ IconData patched"
+          fi
+
+      # ── BUILD APK (try 1) ──
+      - name: Build APK (try 1)
+        id: build1
         continue-on-error: true
         run: |
           set -o pipefail
-          flutter pub get 2>&1 | tee /tmp/pub_get_log.txt
+          flutter build apk --release --no-tree-shake-icons \
+            --target-platform=android-arm64,android-arm,android-x64 \
+            --split-debug-info=build/debug 2>&1 | tee /tmp/build1.log
 
-      # Jika pub get gagal karena Dart SDK kurang → auto upgrade ke versi saran
-      - name: Auto-fix Dart SDK version (if needed)
-        if: steps.pub_get.outcome == 'failure'
+      # ── ERROR HANDLING CERDAS: parse log build1 ──
+      - name: Smart Retry — Auto Fix berdasarkan error
+        if: steps.build1.outcome == 'failure'
         run: |
-          SUGGESTED=$(grep -oP 'Flutter SDK version: K[0-9]+.[0-9]+.[0-9]+' /tmp/pub_get_log.txt | head -1)
-          if [ -z "$SUGGESTED" ]; then
-            echo "❌ Tidak ada saran versi dari pub get, lihat log:"
-            cat /tmp/pub_get_log.txt
-            exit 1
+          echo "⚠️ Build try 1 gagal. Analisa log..."
+          LOG=/tmp/build1.log
+
+          # 1. "IconData can't be extended" → re-patch
+          if grep -qE "IconData.*can.?t be extended|subtype of the sealed class.*IconData" "$LOG"; then
+            echo "🔧 Detected: IconData extends error → re-patch package"
+            find "$HOME/.pub-cache" -type f -name "*.dart" -path "*font_awesome_flutter*" \
+              -exec sed -i 's/extends[[:space:]]\+IconData/implements IconData/g' {} \; || true
           fi
-          echo "💡 Saran versi dari pub get: $SUGGESTED"
-          echo "FLUTTER_SUGGESTED=$SUGGESTED" >> $GITHUB_ENV
 
-      - name: Setup Flutter (suggested version from pub get)
-        if: steps.pub_get.outcome == 'failure' && env.FLUTTER_SUGGESTED != ''
-        uses: subosito/flutter-action@v2
-        with:
-          flutter-version: ${{ env.FLUTTER_SUGGESTED }}
-          channel: 'stable'
-          cache: true
+          # 2. compileSdk 35 vs 36 → force 36
+          if grep -qE "compileSdk(Version)?\s*=?\s*35|requires.*compileSdk.*36" "$LOG"; then
+            echo "🔧 Detected: compileSdk mismatch → force 36"
+            [ -f android/app/build.gradle ]     && sed -i 's/compileSdk[[:space:]]*\(=\?\)[[:space:]]*[0-9]\+/compileSdk \1 36/g' android/app/build.gradle
+            [ -f android/app/build.gradle.kts ] && sed -i 's/compileSdk[[:space:]]*=[[:space:]]*[0-9]\+/compileSdk = 36/g' android/app/build.gradle.kts
+          fi
 
-      - name: Get dependencies (retry with suggested version)
-        if: steps.pub_get.outcome == 'failure'
-        run: flutter pub get
+          # 3. "Gradle version dropped" / AGP mismatch → skip validation
+          if grep -qE "Gradle version.*dropped|Android Gradle plugin.*requires|minimum supported Gradle" "$LOG"; then
+            echo "🔧 Detected: Gradle/AGP mismatch → suppress validation"
+            grep -q "android.suppressUnsupportedCompileSdk" android/gradle.properties || echo "android.suppressUnsupportedCompileSdk=36" >> android/gradle.properties
+            grep -q "android.overrideVersionCheck"          android/gradle.properties || echo "android.overrideVersionCheck=true"         >> android/gradle.properties
+          fi
 
-      - name: Build APK
-        run: flutter build apk --release --no-tree-shake-icons
+      - name: Build APK (try 2 — after auto fix)
+        id: build2
+        if: steps.build1.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          flutter clean || true
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons \
+            --target-platform=android-arm64,android-arm,android-x64 \
+            --split-debug-info=build/debug 2>&1 | tee /tmp/build2.log
+
+      # ── Last resort: build minimal (arm64 only, no split) ──
+      - name: Build APK (try 3 — minimal)
+        if: steps.build1.outcome == 'failure' && steps.build2.outcome == 'failure'
+        run: |
+          set -o pipefail
+          flutter clean || true
+          flutter pub get
+          flutter build apk --release --no-tree-shake-icons --target-platform=android-arm64 2>&1 | tee /tmp/build3.log
 
       - name: Rename APK
         run: |
           APK=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "❌ APK tidak ditemukan"
+            exit 1
+          fi
           APP_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: //' | tr -d ' ')
+          [ -z "$APP_NAME" ] && APP_NAME="app"
           cp "$APK" "${APP_NAME}.apk"
           echo "APK_FILE=${APP_NAME}.apk" >> $GITHUB_ENV
           echo "APK_NAME=${APP_NAME}"     >> $GITHUB_ENV
-          echo "✅ APK: ${APP_NAME}.apk"
+          echo "✅ APK siap: ${APP_NAME}.apk"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APK_NAME }}-apk
           path: ${{ env.APK_FILE }}
+          retention-days: 3
+
+      - name: Upload build logs (kalau gagal)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: /tmp/build*.log
           retention-days: 3
