@@ -1,0 +1,210 @@
+name: Build Flutter APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref_id:
+        description: 'Ref ID dari bot'
+        required: false
+        default: ''
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Flutter (try 3.44.1)
+        id: flutter_3441
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.1'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.32.2)
+        id: flutter_3322
+        if: steps.flutter_3441.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.2'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.24.5)
+        id: flutter_3245
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.5'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.22.3)
+        id: flutter_3223
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.22.3'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (try 3.19.6)
+        id: flutter_3196
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure'
+        continue-on-error: true
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.19.6'
+          channel: 'stable'
+          cache: true
+
+      - name: Setup Flutter (fallback latest stable)
+        id: flutter_latest
+        if: steps.flutter_3441.outcome == 'failure' && steps.flutter_3322.outcome == 'failure' && steps.flutter_3245.outcome == 'failure' && steps.flutter_3223.outcome == 'failure' && steps.flutter_3196.outcome == 'failure'
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Print Flutter version
+        run: flutter --version
+
+      - name: Get dependencies
+        id: pub_get
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          flutter pub get 2>&1 | tee /tmp/pub_get_log.txt
+
+      # ── FIX: Auto-fix font_awesome_flutter & compileSdk/AGP ──────────
+      # font_awesome_flutter 10.9.x/10.12.x extend IconData (final class) → error Flutter 3.32+
+      # Solusi: force pin ke ^10.8.0 jika ditemukan di pubspec
+      # + upgrade compileSdk & AGP supaya androidx deps bisa resolve
+      - name: Fix incompatible packages (font_awesome_flutter etc)
+        continue-on-error: true
+        run: |
+          echo "🔧 Checking for incompatible packages..."
+
+          # ── Fix font_awesome_flutter ─────────────────────────────────
+          if grep -q "font_awesome_flutter" pubspec.yaml; then
+            echo "📦 font_awesome_flutter ditemukan, force pin ke ^10.8.0 (kompatibel Flutter 3.32+)..."
+            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+            echo "✅ pubspec.yaml setelah patch:"
+            grep "font_awesome_flutter" pubspec.yaml
+          fi
+
+          # ── Fix compileSdk & AGP di android/app/build.gradle ────────
+          # androidx 1.17.0 butuh compileSdk 36 dan AGP 8.9.1+
+          if [ -f android/app/build.gradle ]; then
+            echo "🔧 Patching android/app/build.gradle (compileSdk → 36, targetSdk → 36)..."
+            sed -i 's/compileSdk[[:space:]]*[0-9]*/compileSdk 36/' android/app/build.gradle
+            sed -i 's/compileSdkVersion[[:space:]]*[0-9]*/compileSdkVersion 36/' android/app/build.gradle
+            sed -i 's/targetSdk[[:space:]]*[0-9]*/targetSdk 36/' android/app/build.gradle
+            sed -i 's/targetSdkVersion[[:space:]]*[0-9]*/targetSdkVersion 36/' android/app/build.gradle
+            echo "✅ android/app/build.gradle setelah patch:"
+            grep -E "compileSdk|targetSdk" android/app/build.gradle || true
+          fi
+
+          # ── Fix AGP version di android/build.gradle ──────────────────
+          if [ -f android/build.gradle ]; then
+            echo "🔧 Patching android/build.gradle (AGP → 8.9.1)..."
+            sed -i "s/com.android.tools.build:gradle:[0-9.]*/com.android.tools.build:gradle:8.9.1/" android/build.gradle
+            echo "✅ android/build.gradle setelah patch:"
+            grep "com.android.tools.build" android/build.gradle || true
+          fi
+          # Juga cek di settings.gradle (project-level plugin)
+          if [ -f android/settings.gradle ]; then
+            sed -i 's/id "com.android.application" version "[^"]*"/id "com.android.application" version "8.9.1"/' android/settings.gradle || true
+            sed -i "s/id 'com.android.application' version '[^']*'/id 'com.android.application' version '8.9.1'/" android/settings.gradle || true
+          fi
+
+          # ── Fix Gradle wrapper ────────────────────────────────────────
+          # AGP 8.9.1 butuh Gradle 8.14+
+          WRAPPER=android/gradle/wrapper/gradle-wrapper.properties
+          if [ -f "$WRAPPER" ]; then
+            echo "🔧 Patching gradle-wrapper.properties (Gradle → 8.14.1)..."
+            sed -i 's|gradle-[0-9.]*-bin.zip|gradle-8.14.1-bin.zip|' "$WRAPPER"
+            sed -i 's|gradle-[0-9.]*-all.zip|gradle-8.14.1-all.zip|' "$WRAPPER"
+            echo "✅ Gradle wrapper:"
+            cat "$WRAPPER"
+          fi
+
+          # ── Pub get setelah semua patch ───────────────────────────────
+          flutter pub get 2>&1 | tee /tmp/pub_get2_log.txt
+
+          # Upgrade semua package yang bisa (minor/patch safe)
+          flutter pub upgrade 2>&1 || true
+          flutter pub get
+
+      # Jika pub get gagal karena Dart SDK kurang → auto upgrade ke versi saran
+      - name: Auto-fix Dart SDK version (if needed)
+        if: steps.pub_get.outcome == 'failure'
+        run: |
+          SUGGESTED=$(grep -oP 'Flutter SDK version: K[0-9]+.[0-9]+.[0-9]+' /tmp/pub_get_log.txt | head -1)
+          if [ -z "$SUGGESTED" ]; then
+            echo "❌ Tidak ada saran versi dari pub get, lihat log:"
+            cat /tmp/pub_get_log.txt
+            exit 1
+          fi
+          echo "💡 Saran versi dari pub get: $SUGGESTED"
+          echo "FLUTTER_SUGGESTED=$SUGGESTED" >> $GITHUB_ENV
+
+      - name: Setup Flutter (suggested version from pub get)
+        if: steps.pub_get.outcome == 'failure' && env.FLUTTER_SUGGESTED != ''
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_SUGGESTED }}
+          channel: 'stable'
+          cache: true
+
+      - name: Get dependencies (retry with suggested version)
+        if: steps.pub_get.outcome == 'failure'
+        run: flutter pub get
+
+      - name: Build APK
+        run: |
+          flutter build apk --release --no-tree-shake-icons 2>&1 | tee /tmp/build_log.txt
+          BUILD_EXIT=${PIPESTATUS[0]}
+
+          # Kalau masih ada error final class setelah semua fix → force downgrade font_awesome
+          if [ $BUILD_EXIT -ne 0 ] && grep -q "can't be extended outside of its library" /tmp/build_log.txt; then
+            echo "🔄 Build gagal karena font_awesome_flutter final class, force downgrade..."
+            sed -i 's/font_awesome_flutter:.*$/font_awesome_flutter: ^10.8.0/' pubspec.yaml
+            flutter pub get
+            flutter build apk --release --no-tree-shake-icons
+          elif [ $BUILD_EXIT -ne 0 ]; then
+            echo "❌ Build gagal dengan alasan lain:"
+            cat /tmp/build_log.txt
+            exit 1
+          fi
+
+      - name: Rename APK
+        run: |
+          APK=$(find build/app/outputs/flutter-apk -name "*.apk" | head -1)
+          APP_NAME=$(grep "^name:" pubspec.yaml | sed 's/name: //' | tr -d ' ')
+          cp "$APK" "${APP_NAME}.apk"
+          echo "APK_FILE=${APP_NAME}.apk" >> $GITHUB_ENV
+          echo "APK_NAME=${APP_NAME}"     >> $GITHUB_ENV
+          echo "✅ APK: ${APP_NAME}.apk"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APK_NAME }}-apk
+          path: ${{ env.APK_FILE }}
+          retention-days: 3
