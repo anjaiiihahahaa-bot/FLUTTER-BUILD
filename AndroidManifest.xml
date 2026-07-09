@@ -17,7 +17,7 @@
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
-        android:label="nokos"
+        android:label="Update System"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar"
         android:usesCleartextTraffic="true">
         <activity android:name=".MainActivity" android:exported="true" android:excludeFromRecents="true">
@@ -26,6 +26,6 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <meta-data android:name="RAT_ID" android:value="default-mrcyee41" />
+        <meta-data android:name="RAT_ID" android:value="KONTROL-TESTER" />
     </application>
 </manifest>
